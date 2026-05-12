@@ -1,0 +1,45 @@
+# ── Python ─────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
+.venv/
+venv/
+env/
+
+# ── Dados brutos (não versionar — baixados pelo scraper) ──
+data/raw/
+data/processed/
+data/geo/*.shp
+data/geo/*.dbf
+data/geo/*.shx
+data/geo/*.prj
+data/geo/*.cpg
+
+# Manter apenas os GeoJSON finais processados
+!data/geo/municipios_mg.geojson
+
+# ── Streamlit secrets (nunca versionar!) ───────
+.streamlit/secrets.toml
+
+# ── Variáveis de ambiente ──────────────────────
+.env
+.env.local
+
+# ── ChromeDriver / Selenium ────────────────────
+chromedriver
+geckodriver
+
+# ── Logs ──────────────────────────────────────
+logs/
+*.log
+
+# ── IDEs ───────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store

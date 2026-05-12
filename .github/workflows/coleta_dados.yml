@@ -1,0 +1,82 @@
+# .github/workflows/coleta_dados.yml
+# Pipeline automático de coleta — executa diariamente às 06h BRT
+# Descoberta automática dos PDFs do FNDE para qualquer ano (2025, 2026, ...)
+
+name: Coleta de Dados — FJP, FNDE, INEP, IBGE
+
+on:
+  schedule:
+    - cron: "0 9 * * *"     # 06:00 BRT (UTC-3) todos os dias
+  workflow_dispatch:         # permite execução manual
+    inputs:
+      anos:
+        description: "Anos para coletar (ex: 2024,2025)"
+        required: false
+        default: "2024,2025"
+      forcar_recoleta:
+        description: "Forçar recoleta mesmo com cache válido"
+        type: boolean
+        default: false
+
+jobs:
+  coletar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout do repositório
+        uses: actions/checkout@v4
+
+      - name: Configurar Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Instalar dependências
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Instalar Chrome (para scraping FJP via Selenium)
+        uses: browser-actions/setup-chrome@v1
+
+      - name: Descobrir e baixar PDFs do FNDE (automático)
+        run: python -m scraper.fnde_loader
+        env:
+          ANOS_COLETA: ${{ github.event.inputs.anos || '2024,2025' }}
+
+      - name: Coletar índices FJP (Selenium)
+        run: python -m scraper.scraper_fjp
+        env:
+          HEADLESS: "true"
+          ANOS_COLETA: ${{ github.event.inputs.anos || '2024,2025' }}
+
+      - name: Baixar indicadores INEP
+        run: python -m scraper.downloader_inep
+        env:
+          ANOS_COLETA: ${{ github.event.inputs.anos || '2024,2025' }}
+
+      - name: Carregar GeoJSON IBGE
+        run: python -m scraper.geo_loader
+
+      - name: Consolidar todos os dados
+        run: python -m scraper.scheduler
+        env:
+          ANOS_COLETA: ${{ github.event.inputs.anos || '2024,2025' }}
+
+      - name: Commit e push dos dados atualizados
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/processed/ data/geo/
+          git diff --staged --quiet || \
+            git commit -m "chore: atualiza dados [$(date '+%Y-%m-%d %H:%M')] 🤖"
+          git push
+
+      - name: Resumo da coleta
+        if: always()
+        run: |
+          echo "=== Arquivos gerados ==="
+          ls -lh data/processed/ 2>/dev/null || echo "Nenhum arquivo em processed/"
+          ls -lh data/geo/       2>/dev/null || echo "Nenhum arquivo em geo/"
