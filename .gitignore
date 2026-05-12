@@ -12,7 +12,10 @@ env/
 
 # ── Dados brutos (não versionar — baixados pelo scraper) ──
 data/raw/
-data/processed/
+
+# ── Dados processados e geo SÃO versionados ──────────────
+# Necessário para o Streamlit Cloud funcionar sem rodar o scraper
+# data/processed/  ← removido do gitignore
 data/geo/*.shp
 data/geo/*.dbf
 data/geo/*.shx
@@ -43,3 +46,9 @@ logs/
 *.swp
 *.swo
 .DS_Store
+
+check_*.py
+debug_*.py
+fix_*.py
+inspecionar_*.py
+setup_dados.py

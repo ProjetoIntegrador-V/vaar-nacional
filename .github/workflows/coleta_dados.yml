@@ -1,82 +1,139 @@
 # .github/workflows/coleta_dados.yml
-# Pipeline automático de coleta — executa diariamente às 06h BRT
-# Descoberta automática dos PDFs do FNDE para qualquer ano (2025, 2026, ...)
+# Atualização automática dos dados FNDE, FJP e IBGE
+# Executa diariamente às 06h BRT (09h UTC)
+# Também pode ser acionado manualmente pelo GitHub
 
-name: Coleta de Dados — FJP, FNDE, INEP, IBGE
+name: 🔄 Coleta e Atualização de Dados
 
 on:
   schedule:
-    - cron: "0 9 * * *"     # 06:00 BRT (UTC-3) todos os dias
-  workflow_dispatch:         # permite execução manual
+    - cron: "0 9 * * *"    # 06:00 BRT todos os dias
+  workflow_dispatch:        # execução manual pelo GitHub Actions
     inputs:
       anos:
-        description: "Anos para coletar (ex: 2024,2025)"
+        description: "Anos para coletar (ex: 2024,2025,2026)"
         required: false
-        default: "2024,2025"
+        default: "2024,2025,2026"
       forcar_recoleta:
         description: "Forçar recoleta mesmo com cache válido"
         type: boolean
         default: false
 
 jobs:
-  coletar:
+  coletar-dados:
+    name: Coleta de Dados
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
+
+    permissions:
+      contents: write    # necessário para commitar os dados atualizados
 
     steps:
-      - name: Checkout do repositório
+      # ── 1. Checkout ──────────────────────────────────────────────────────────
+      - name: 📥 Checkout do repositório
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Configurar Python 3.11
+      # ── 2. Python ────────────────────────────────────────────────────────────
+      - name: 🐍 Configurar Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: "pip"
 
-      - name: Instalar dependências
+      # ── 3. Dependências ──────────────────────────────────────────────────────
+      - name: 📦 Instalar dependências
         run: |
           pip install --upgrade pip
-          pip install -r requirements.txt
+          # Instalar sem Selenium (não usa Chrome no CI para FJP)
+          pip install \
+            pandas pyarrow requests beautifulsoup4 lxml \
+            pdfplumber openpyxl loguru tenacity streamlit \
+            geopandas shapely pyproj fiona plotly
 
-      - name: Instalar Chrome (para scraping FJP via Selenium)
-        uses: browser-actions/setup-chrome@v1
+      # ── 4. Criar pastas necessárias ───────────────────────────────────────────
+      - name: 📁 Criar estrutura de pastas
+        run: |
+          mkdir -p data/raw data/processed data/geo
 
-      - name: Descobrir e baixar PDFs do FNDE (automático)
-        run: python -m scraper.fnde_loader
+      # ── 5. Copiar dados existentes do repositório ─────────────────────────────
+      - name: 📂 Restaurar dados processados
+        run: |
+          echo "Dados do repositório disponíveis em data/"
+          ls -lh data/processed/ 2>/dev/null || echo "Pasta processed vazia"
+          ls -lh data/geo/       2>/dev/null || echo "Pasta geo vazia"
+
+      # ── 6. Descoberta e download FNDE ─────────────────────────────────────────
+      - name: 🔍 Baixar dados FNDE (receitas + inabilitados + coeficientes)
+        run: |
+          python -m scraper.fnde_loader
+          python -m scraper.fnde_coef_loader
         env:
-          ANOS_COLETA: ${{ github.event.inputs.anos || '2024,2025' }}
+          ANOS_COLETA: ${{ github.event.inputs.anos || '2024,2025,2026' }}
 
-      - name: Coletar índices FJP (Selenium)
-        run: python -m scraper.scraper_fjp
-        env:
-          HEADLESS: "true"
-          ANOS_COLETA: ${{ github.event.inputs.anos || '2024,2025' }}
+      # ── 7. Importar índices FJP do Google Drive ───────────────────────────────
+      - name: 📊 Importar índices FJP (Google Drive)
+        run: python fjp_importer.py
+        continue-on-error: true    # não bloqueia se o Drive estiver indisponível
 
-      - name: Baixar indicadores INEP
-        run: python -m scraper.downloader_inep
-        env:
-          ANOS_COLETA: ${{ github.event.inputs.anos || '2024,2025' }}
-
-      - name: Carregar GeoJSON IBGE
+      # ── 8. Carregar GeoJSON IBGE ──────────────────────────────────────────────
+      - name: 🗺️ Carregar malha territorial MG (IBGE)
         run: python -m scraper.geo_loader
+        continue-on-error: true    # não bloqueia se API IBGE estiver instável
 
-      - name: Consolidar todos os dados
+      # ── 9. Consolidar todos os dados ──────────────────────────────────────────
+      - name: ⚙️ Consolidar dados
         run: python -m scraper.scheduler
-        env:
-          ANOS_COLETA: ${{ github.event.inputs.anos || '2024,2025' }}
 
-      - name: Commit e push dos dados atualizados
+      # ── 10. Executar testes de integridade ────────────────────────────────────
+      - name: 🧪 Executar testes de integridade
+        run: python test_suite.py
+        continue-on-error: true    # reporta mas não bloqueia o deploy
+
+      # ── 11. Commit e push dos dados atualizados ───────────────────────────────
+      - name: 💾 Commitar dados atualizados
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/processed/ data/geo/
-          git diff --staged --quiet || \
-            git commit -m "chore: atualiza dados [$(date '+%Y-%m-%d %H:%M')] 🤖"
-          git push
 
-      - name: Resumo da coleta
+          # Adicionar apenas dados processados (não dados brutos)
+          git add data/processed/
+          git add data/geo/municipios_mg.geojson
+
+          # Commitar apenas se houver mudanças
+          if git diff --staged --quiet; then
+            echo "✅ Nenhuma mudança nos dados — commit não necessário."
+          else
+            DATA=$(date '+%Y-%m-%d %H:%M UTC')
+            git commit -m "chore: atualiza dados [$DATA] 🤖"
+            git push
+            echo "✅ Dados atualizados e enviados para o repositório."
+          fi
+
+      # ── 12. Resumo final ──────────────────────────────────────────────────────
+      - name: 📋 Resumo da coleta
         if: always()
         run: |
-          echo "=== Arquivos gerados ==="
-          ls -lh data/processed/ 2>/dev/null || echo "Nenhum arquivo em processed/"
-          ls -lh data/geo/       2>/dev/null || echo "Nenhum arquivo em geo/"
+          echo "=== ARQUIVOS GERADOS ==="
+          echo "--- Processados ---"
+          ls -lh data/processed/ 2>/dev/null || echo "Nenhum arquivo"
+          echo "--- Geoespaciais ---"
+          ls -lh data/geo/ 2>/dev/null || echo "Nenhum arquivo"
+          echo ""
+          echo "=== ESTATÍSTICAS ==="
+          python -c "
+          import pandas as pd
+          from pathlib import Path
+
+          cons = Path('data/processed/consolidado.parquet')
+          if cons.exists():
+              df = pd.read_parquet(cons)
+              print(f'Consolidado: {len(df)} registros')
+              print(f'Municípios: {df[\"municipio\"].nunique()}')
+              print(f'Anos: {sorted(df[\"ano\"].unique())}')
+              print(f'Com VAAR: {df[\"repasse_vaar\"].notna().sum()}')
+              print(f'Inabilitados: {(df[\"habilitado_vaar\"]==False).sum()}')
+          else:
+              print('Consolidado não encontrado')
+          " 2>/dev/null || echo "Erro ao ler estatísticas"
