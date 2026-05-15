@@ -40,6 +40,7 @@ with st.sidebar:
         - 🗺️ Mapa — visualização por município
         - 🔍 Consulta — painel por município
         - 🏆 Ranking — comparação entre municípios
+        - 💰 Análise de Repasse — Dinheiro que Ficou na Mesa
         """
     )
     st.divider()
