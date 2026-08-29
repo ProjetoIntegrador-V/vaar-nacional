@@ -50,3 +50,6 @@ pyarrow>=16.1.0
 
 # ── Agendamento (scheduler local para dev) ─────
 schedule>=1.2.2
+
+#Banco de dados
+pymongo

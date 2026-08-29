@@ -36,6 +36,12 @@ ValorVAAR = CoefVAAR × Total_VAAR_UF
 | INEP (inep.gov.br/microdados) | SAEB, Censo Escolar | Download ZIP/CSV |
 | IBGE (ibge.gov.br/api/v1) | Shapefile, população | API REST |
 
+## Pré Requisitos
+| IDE Sugerida: VsCode |
+| Python 3.13 |
+| Git |
+
+
 ## Instalação
 
 ```bash
