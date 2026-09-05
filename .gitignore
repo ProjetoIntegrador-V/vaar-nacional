@@ -22,7 +22,8 @@ data/geo/*.shx
 data/geo/*.prj
 data/geo/*.cpg
 
-# Manter apenas os GeoJSON finais processados
+# Malhas baixadas sob demanda (demais UFs); MG continua versionado
+data/geo/*.geojson
 !data/geo/municipios_mg.geojson
 
 # ── Streamlit secrets (nunca versionar!) ───────

@@ -1,43 +1,50 @@
 """
 scraper/geo_loader.py
-Carrega o shapefile (GeoJSON) dos 853 municípios de Minas Gerais
-via API oficial do IBGE e enriquece com dados populacionais.
+Carrega a malha municipal (GeoJSON) de uma UF via geodata-br / IBGE
+e enriquece com nomes, meso/microrregião e população.
 
 Uso:
-    python -m scraper.geo_loader
+    python -m scraper.geo_loader           # MG (padrão)
+    python -m scraper.geo_loader SP
+    python -m scraper.geo_loader SP --forcar
 """
 from __future__ import annotations
 import json
+import sys
 import requests
 import pandas as pd
 import geopandas as gpd
-from shapely.geometry import shape
 from loguru import logger
 from tenacity import retry, stop_after_attempt, wait_exponential
 
-from utils.config import URLS, COD_ESTADO_MG, TIMEOUT_S, DATA_GEO, DATA_PROCESSED
-from utils.cache import salvar_geojson, cache_valido
+from utils.config import (
+    URLS, TIMEOUT_S, DATA_GEO, UF_PADRAO, ESTADOS,
+    meta_estado, nome_geojson_uf,
+)
+from utils.cache import salvar_geojson
 
 HEADERS = {"Accept": "application/json", "User-Agent": "fundeb-icms-mg/1.0"}
 
-# URLs da API IBGE
-#URL_MALHA    = f"https://servicodados.ibge.gov.br/api/v3/malhas/estados/{COD_ESTADO_MG}/municipios"
-#URL_MALHA     = "https://servicodados.ibge.gov.br/api/v3/malhas/estados/31?resolucao=5&formato=application/vnd.geo+json"
-URL_MALHA     = "https://servicodados.ibge.gov.br/api/v3/malhas/paises/BR?resolucao=5&divisao=municipio&formato=application/vnd.geo+json"
-URL_MUNS      = f"https://servicodados.ibge.gov.br/api/v1/localidades/estados/{COD_ESTADO_MG}/municipios"
-URL_POPULACAO = "https://servicodados.ibge.gov.br/api/v3/agregados/6579/periodos/2022/variaveis/9324?localidades=N6[3100102,3100201]"
+
+def _url_municipios(cod: str) -> str:
+    return URLS["ibge_municipios"].format(cod=cod)
+
+
+def _url_malha(cod: str) -> str:
+    return URLS["geodata_br_mun"].format(cod=cod)
 
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=3, max=15))
-def baixar_lista_municipios() -> pd.DataFrame:
+def baixar_lista_municipios(uf: str = UF_PADRAO) -> pd.DataFrame:
     """
-    Baixa a lista completa dos 853 municípios de MG com código IBGE e nome.
+    Baixa a lista de municípios da UF com código IBGE e nome.
 
     Returns:
-        DataFrame com [cod_ibge, municipio]
+        DataFrame com [cod_ibge, municipio, mesorregiao, microrregiao]
     """
-    logger.info("Baixando lista de municípios de MG (IBGE)...")
-    resp = requests.get(URL_MUNS, headers=HEADERS, timeout=TIMEOUT_S)
+    meta = meta_estado(uf)
+    logger.info(f"Baixando lista de municípios de {uf.upper()} (IBGE)...")
+    resp = requests.get(_url_municipios(meta["cod"]), headers=HEADERS, timeout=TIMEOUT_S)
     resp.raise_for_status()
 
     dados = resp.json()
@@ -45,6 +52,7 @@ def baixar_lista_municipios() -> pd.DataFrame:
         {
             "cod_ibge": str(m["id"]),
             "municipio": m["nome"],
+            "uf": uf.strip().upper(),
             "mesorregiao": m.get("microrregiao", {}).get("mesorregiao", {}).get("nome", ""),
             "microrregiao": m.get("microrregiao", {}).get("nome", ""),
         }
@@ -52,24 +60,18 @@ def baixar_lista_municipios() -> pd.DataFrame:
     ]
 
     df = pd.DataFrame(municipios)
-    logger.success(f"Lista de municípios: {len(df)} municípios de MG.")
+    logger.success(f"Lista de municípios: {len(df)} municípios de {uf.upper()}.")
     return df
 
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=5, max=30))
-def baixar_geojson_mg() -> dict:
+def baixar_geojson(uf: str = UF_PADRAO) -> dict:
     """
-    Baixa o GeoJSON dos municípios de MG.
-    Usa o repositório de malhas do IBGE no GitHub como fonte confiável.
+    Baixa o GeoJSON dos municípios da UF (tbrugz/geodata-br).
     """
-    logger.info("Baixando malha territorial de MG (IBGE via GitHub)...")
-
-    # Fonte: repositório oficial de malhas do IBGE
-    # Contém todos os 853 municípios de MG com polígonos individuais
-    url = (
-        "https://raw.githubusercontent.com/tbrugz/geodata-br/"
-        "master/geojson/geojs-31-mun.json"
-    )
+    meta = meta_estado(uf)
+    logger.info(f"Baixando malha territorial de {uf.upper()} (geodata-br)...")
+    url = _url_malha(meta["cod"])
 
     resp = requests.get(url, headers=HEADERS, timeout=120)
     resp.raise_for_status()
@@ -79,6 +81,10 @@ def baixar_geojson_mg() -> dict:
     logger.success(f"GeoJSON baixado: {n_features} polígonos municipais.")
     return geojson
 
+
+def baixar_geojson_mg() -> dict:
+    """Compatibilidade: malha de MG."""
+    return baixar_geojson("MG")
 
 
 def enriquecer_geojson(geojson: dict, df_muns: pd.DataFrame) -> dict:
@@ -91,14 +97,12 @@ def enriquecer_geojson(geojson: dict, df_muns: pd.DataFrame) -> dict:
     for feature in geojson.get("features", []):
         props = feature.get("properties", {})
 
-        # Este GeoJSON usa 'id' como código IBGE de 7 dígitos
         cod = str(props.get("id", props.get("codarea", ""))).strip()
 
         props["cod_ibge"] = cod
         if not props.get("municipio"):
             props["municipio"] = props.get("name", "")
 
-        # Enriquecer com dados adicionais da lista IBGE
         if cod in idx:
             props.update(idx[cod])
 
@@ -110,35 +114,27 @@ def enriquecer_geojson(geojson: dict, df_muns: pd.DataFrame) -> dict:
 def geojson_para_geodataframe(geojson: dict) -> gpd.GeoDataFrame:
     """
     Converte GeoJSON para GeoDataFrame GeoPandas com CRS SIRGAS 2000.
-
-    Returns:
-        GeoDataFrame pronto para uso no Folium/Plotly
     """
     gdf = gpd.GeoDataFrame.from_features(
         geojson["features"],
-        crs="EPSG:4674"   # SIRGAS 2000 — sistema oficial do Brasil
+        crs="EPSG:4674",
     )
-    gdf = gdf.rename(columns={"geometry": "geometry"})
     logger.info(f"GeoDataFrame: {len(gdf)} municípios | CRS: {gdf.crs}")
     return gdf
 
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=3, max=15))
-def baixar_populacao_mg() -> pd.DataFrame:
+def baixar_populacao(uf: str = UF_PADRAO) -> pd.DataFrame:
     """
-    Baixa a população estimada dos municípios de MG via API IBGE (Censo 2022).
-
-    Returns:
-        DataFrame com [cod_ibge, populacao]
+    Baixa a população estimada dos municípios da UF (IBGE Censo 2022).
     """
-    logger.info("Baixando dados populacionais de MG (IBGE Censo 2022)...")
+    meta = meta_estado(uf)
+    logger.info(f"Baixando dados populacionais de {uf.upper()} (IBGE Censo 2022)...")
 
-    # API IBGE Agregados — tabela 6579, variável 9324 (pop. residente)
-    # Localidade N6 = municípios, [cod_estado=31] = MG
     url = (
         "https://servicodados.ibge.gov.br/api/v3/agregados/6579"
-        f"/periodos/2022/variaveis/9324"
-        f"?localidades=N6[in~{COD_ESTADO_MG}]"
+        "/periodos/2022/variaveis/9324"
+        f"?localidades=N6[in~{meta['cod']}]"
     )
 
     resp = requests.get(url, headers=HEADERS, timeout=60)
@@ -148,16 +144,13 @@ def baixar_populacao_mg() -> pd.DataFrame:
     registros = []
     for variavel in dados:
         for resultado in variavel.get("resultados", []):
-            for localidade in resultado.get("classificacoes", []):
-                pass
-            series = resultado.get("series", [])
-            for serie in series:
+            for serie in resultado.get("series", []):
                 cod = str(serie["localidade"]["id"])
                 valor = serie["serie"].get("2022", None)
                 if cod and valor:
                     registros.append({
                         "cod_ibge": cod,
-                        "populacao": int(valor) if valor != "-" else None
+                        "populacao": int(valor) if valor != "-" else None,
                     })
 
     df = pd.DataFrame(registros)
@@ -165,21 +158,34 @@ def baixar_populacao_mg() -> pd.DataFrame:
     return df
 
 
-# ── Execução principal ───────────────────────────────────────────────────────
+def baixar_populacao_mg() -> pd.DataFrame:
+    """Compatibilidade: população de MG."""
+    return baixar_populacao("MG")
 
-def carregar_geodados() -> tuple[dict, gpd.GeoDataFrame]:
+
+def caminho_geojson_uf(uf: str = UF_PADRAO):
+    return DATA_GEO / f"{nome_geojson_uf(uf)}.geojson"
+
+
+def carregar_geodados(
+    uf: str = UF_PADRAO,
+    forcar: bool = False,
+) -> tuple[dict, gpd.GeoDataFrame]:
     """
-    Função principal: baixa e consolida todos os dados geoespaciais.
+    Baixa (se necessário) e consolida a malha municipal da UF.
 
     Returns:
         Tupla (geojson_dict, GeoDataFrame)
     """
-    caminho_geojson = DATA_GEO / "municipios_mg.geojson"
-    caminho_gdf     = DATA_PROCESSED / "geodados_mg.parquet"
+    uf = uf.strip().upper()
+    if uf not in ESTADOS:
+        raise ValueError(f"UF inválida: {uf}")
 
-    # Verificar cache
-    if cache_valido(caminho_geojson, ttl_horas=168):  # 7 dias
-        logger.info("Cache GeoJSON válido — carregando do disco.")
+    nome = nome_geojson_uf(uf)
+    caminho_geojson = caminho_geojson_uf(uf)
+
+    if caminho_geojson.exists() and not forcar:
+        logger.info(f"GeoJSON em disco — {caminho_geojson.name}")
         with open(caminho_geojson, encoding="utf-8") as f:
             geojson = json.load(f)
         gdf = gpd.read_file(caminho_geojson)
@@ -187,49 +193,45 @@ def carregar_geodados() -> tuple[dict, gpd.GeoDataFrame]:
 
     DATA_GEO.mkdir(parents=True, exist_ok=True)
 
-    # 1. Lista de municípios
-    df_muns = baixar_lista_municipios()
-
-    # 2. GeoJSON da malha territorial
-    geojson = baixar_geojson_mg()
-
-    # 3. Enriquecer GeoJSON com nomes e regiões
+    df_muns = baixar_lista_municipios(uf)
+    geojson = baixar_geojson(uf)
     geojson = enriquecer_geojson(geojson, df_muns)
 
-    # 4. Dados populacionais (melhor esforço — não bloqueia se falhar)
     try:
-        df_pop = baixar_populacao_mg()
-        # Integrar população no GeoJSON
+        df_pop = baixar_populacao(uf)
         pop_idx = df_pop.set_index("cod_ibge")["populacao"].to_dict()
-        for f in geojson["features"]:
-            cod = f["properties"].get("cod_ibge", "")
-            f["properties"]["populacao"] = pop_idx.get(cod, None)
+        for feat in geojson["features"]:
+            cod = feat["properties"].get("cod_ibge", "")
+            feat["properties"]["populacao"] = pop_idx.get(cod, None)
     except Exception as e:
         logger.warning(f"Dados populacionais não carregados: {e}")
 
-    # 5. Salvar GeoJSON
-    salvar_geojson(geojson, "municipios_mg")
+    salvar_geojson(geojson, nome)
+    gdf = geodataframe_para_arquivo(geojson, uf)
 
-    # 6. Converter para GeoDataFrame
-    gdf = geodataframe_para_arquivo(geojson)
-
-    logger.success(f"Geodados de MG prontos: {len(geojson['features'])} municípios.")
+    logger.success(
+        f"Geodados de {uf} prontos: {len(geojson['features'])} municípios."
+    )
     return geojson, gdf
 
 
-def geodataframe_para_arquivo(geojson: dict) -> gpd.GeoDataFrame:
+def geodataframe_para_arquivo(
+    geojson: dict,
+    uf: str = UF_PADRAO,
+) -> gpd.GeoDataFrame:
     """Cria e salva o GeoDataFrame final."""
     gdf = geojson_para_geodataframe(geojson)
-    # Salvar como GeoJSON (Streamlit Folium lê direto)
-    gdf.to_file(DATA_GEO / "municipios_mg.geojson", driver="GeoJSON")
-    logger.info(f"GeoDataFrame salvo: {DATA_GEO / 'municipios_mg.geojson'}")
+    destino = caminho_geojson_uf(uf)
+    gdf.to_file(destino, driver="GeoJSON")
+    logger.info(f"GeoDataFrame salvo: {destino}")
     return gdf
 
 
 if __name__ == "__main__":
-    geojson, gdf = carregar_geodados()
-    #print(gdf[["cod_ibge", "municipio", "populacao"]].head(10))
-    #print(f"\nTotal: {len(gdf)} municípios | CRS: {gdf.crs}")
+    args = [a for a in sys.argv[1:] if a != "--forcar"]
+    forcar = "--forcar" in sys.argv[1:]
+    uf_cli = args[0].upper() if args else UF_PADRAO
+    geojson, gdf = carregar_geodados(uf_cli, forcar=forcar)
     print(gdf.columns.tolist())
     print(gdf.head(3))
-    print(f"\nTotal: {len(gdf)} municípios | CRS: {gdf.crs}")
+    print(f"\nTotal: {len(gdf)} municípios | UF: {uf_cli} | CRS: {gdf.crs}")

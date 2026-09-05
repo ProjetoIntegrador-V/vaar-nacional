@@ -59,7 +59,7 @@ def carregar_json(nome: str, pasta: Path = DATA_RAW) -> dict | list | None:
 
 
 def salvar_geojson(geojson: dict, nome: str = "municipios_mg") -> Path:
-    """Salva GeoJSON dos municípios de MG."""
+    """Salva GeoJSON municipal (ex.: municipios_mg, municipios_sp)."""
     DATA_GEO.mkdir(parents=True, exist_ok=True)
     caminho = DATA_GEO / f"{nome}.geojson"
     with open(caminho, "w", encoding="utf-8") as f:
